@@ -1,7 +1,5 @@
 import colorsys
-import numpy as np
 from PIL import Image
-from sklearn.cluster import KMeans
 import streamlit as st
 
 # --- 색상 변환 함수 ---
@@ -21,32 +19,39 @@ def hsv_to_hex(h, s, v):
 def rgb_to_hex(r, g, b):
     return f"#{int(r):02x}{int(g):02x}{int(b):02x}".upper()
 
-# --- 이미지 색상 분석 ---
+# --- Pillow 내장 고속 색상 추출 (라이브러리 충돌 방지) ---
 def analyze_clothing_colors(image, k=3):
     img = image.convert('RGB')
-    img = img.resize((150, 150))
-    np_img = np.array(img)
-    pixels = np_img.reshape(-1, 3)
+    img = img.resize((100, 100))
+    pixels = list(img.getdata())
 
-    non_white_mask = ~((pixels[:, 0] > 240) & (pixels[:, 1] > 240) & (pixels[:, 2] > 240))
-    cloth_pixels = pixels[non_white_mask] if np.sum(non_white_mask) > 100 else pixels
+    # 흰색 배경(240 초과) 필터링
+    valid_pixels = [p for p in pixels if not (p[0] > 240 and p[1] > 240 and p[2] > 240)]
+    if not valid_pixels:
+        valid_pixels = pixels
 
-    avg_rgb = np.mean(cloth_pixels, axis=0)
-    avg_hex = rgb_to_hex(avg_rgb[0], avg_rgb[1], avg_rgb[2])
+    # 1. 전체 평균색 계산
+    avg_r = int(sum(p[0] for p in valid_pixels) / len(valid_pixels))
+    avg_g = int(sum(p[1] for p in valid_pixels) / len(valid_pixels))
+    avg_b = int(sum(p[2] for p in valid_pixels) / len(valid_pixels))
+    avg_hex = rgb_to_hex(avg_r, avg_g, avg_b)
 
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
-    kmeans.fit(cloth_pixels)
-    counts = np.bincount(kmeans.labels_)
-    ordered_centers = kmeans.cluster_centers_[np.argsort(-counts)]
-    dominant_hexes = [rgb_to_hex(c[0], c[1], c[2]) for c in ordered_centers]
+    # 2. 대표 색상 추출 (Pillow Adaptive Palette 활용)
+    filtered_img = Image.new('RGB', (len(valid_pixels), 1))
+    filtered_img.putdata(valid_pixels)
+    quantized = filtered_img.quantize(colors=k, method=Image.Quantize.MEDIANCUT)
+    palette = quantized.getpalette()[:k*3]
+    
+    dominant_hexes = [
+        rgb_to_hex(palette[i], palette[i+1], palette[i+2])
+        for i in range(0, len(palette), 3)
+    ]
 
     return avg_hex, dominant_hexes
 
 # --- 바지 색상 기준 신발 & 양말 추천 엔진 ---
 def get_footwear_and_socks(bottom_hex):
     h, s, v = hex_to_hsv(bottom_hex)
-    
-    # 1. 어두운 계열 바지 (블랙, 차콜, 네이비 등)
     if v < 40:
         return {
             "socks_color": bottom_hex,
@@ -55,7 +60,6 @@ def get_footwear_and_socks(bottom_hex):
             "shoes_name": "블랙 더비 / 첼시 / 다크 스니커즈",
             "guide": "바지-양말-신발을 어둡게 연결하면 하체가 길어 보이며 포멀·모던 룩에 최적입니다."
         }
-    # 2. 아주 밝은 계열 바지 (화이트, 크림, 라이트베이지)
     elif v > 80 and s < 30:
         return {
             "socks_color": "#E5E5E5",
@@ -64,7 +68,6 @@ def get_footwear_and_socks(bottom_hex):
             "shoes_name": "클린 화이트 스니커즈 / 독일군",
             "guide": "밝은 팬츠 아래 검정 양말은 시선이 끊기므로 밝은 톤으로 통일해 깨끗한 인상을 줍니다."
         }
-    # 3. 중간 톤 및 유색 팬츠 (카키, 올리브, 브라운, 데님 계열)
     else:
         return {
             "socks_color": "#E5E5E5",
@@ -101,8 +104,6 @@ def get_2piece_recommendations(top_hex):
             {"name": "클래식 네이비", "bottom": "#1B2A47"},
         ]
     }
-    
-    # 신발/양말 정보 자동 결합
     for category in raw_data.values():
         for item in category:
             item.update(get_footwear_and_socks(item["bottom"]))
@@ -175,15 +176,13 @@ def get_3piece_recommendations(outer_hex):
             {"name": "클래식 네이비 팬츠", "inner": "#FAF0CA", "bottom": "#1B2A47", "bg": "#1B2A47"}
         ]
     }
-    
     for category in raw_data.values():
         for item in category:
             item.update(get_footwear_and_socks(item["bottom"]))
     return raw_data
 
-# --- 풀셋 일러스트 렌더링 함수 (상의 + 하의 + 양말 + 신발) ---
+# --- 일러스트 렌더링 함수 ---
 def render_full_outfit_card(top_color, bottom_color, socks_color, shoes_color, inner_color=None, label="", shoes_desc="", socks_desc="", guide=""):
-    # 3피스일 경우 오픈된 아우터 SVG, 2피스일 경우 단색 티셔츠 SVG 적용
     if inner_color:
         top_svg = (
             f'<svg width="72" height="54" viewBox="0 0 32 26" style="margin-bottom:-2px; z-index:4;">'
@@ -199,26 +198,17 @@ def render_full_outfit_card(top_color, bottom_color, socks_color, shoes_color, i
             f'</svg>'
         )
 
-    # 하의 + 양말(발목) + 신발(슈즈 형태) 결합 SVG
     lower_svg = (
         f'<svg width="48" height="66" viewBox="0 0 24 33" style="z-index:2;">'
-        f'<!-- 팬츠 -->'
         f'<path d="M 4 0 L 20 0 L 22 19 L 14 19 L 12 7 L 10 19 L 2 19 Z" fill="{bottom_color}" stroke="#FFFFFF" stroke-width="0.7"/>'
-        f'<!-- 양말 (발목 노출 부위) -->'
         f'<rect x="4.5" y="19" width="4.5" height="4" fill="{socks_color}" stroke="#FFFFFF" stroke-width="0.4"/>'
         f'<rect x="15" y="19" width="4.5" height="4" fill="{socks_color}" stroke="#FFFFFF" stroke-width="0.4"/>'
-        f'<!-- 신발 (좌/우 슈즈) -->'
         f'<path d="M 2.5 23 L 9 23 L 9.5 27 L 1.5 27 Z" fill="{shoes_color}" stroke="#FFFFFF" stroke-width="0.6"/>'
         f'<path d="M 15 23 L 21.5 23 L 22.5 27 L 14.5 27 Z" fill="{shoes_color}" stroke="#FFFFFF" stroke-width="0.6"/>'
         f'</svg>'
     )
 
-    # 파츠별 칩 생성
-    if inner_color:
-        chip_inner = f'<div><span style="display:inline-block; width:8px; height:8px; background:{inner_color}; border-radius:2px; border:1px solid #aaa; margin-right:2px; vertical-align:middle;"></span>이너</div>'
-    else:
-        chip_inner = ''
-        
+    chip_inner = f'<div><span style="display:inline-block; width:8px; height:8px; background:{inner_color}; border-radius:2px; border:1px solid #aaa; margin-right:2px; vertical-align:middle;"></span>이너</div>' if inner_color else ''
     chips = (
         f'<div style="display:flex; justify-content:space-around; background:#F8F9FA; padding:6px 2px; border-radius:6px; margin:6px 0 8px 0; font-size:10px; font-weight:600; color:#333;">'
         f'<div><span style="display:inline-block; width:8px; height:8px; background:{top_color}; border-radius:2px; border:1px solid #aaa; margin-right:2px; vertical-align:middle;"></span>상의</div>'
