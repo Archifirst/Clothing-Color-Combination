@@ -2,7 +2,6 @@ import colorsys
 from PIL import Image
 import streamlit as st
 
-# --- 색상 변환 함수 ---
 def hex_to_hsv(hex_str):
     hex_str = hex_str.lstrip('#')
     r, g, b = [int(hex_str[i:i+2], 16) / 255.0 for i in (0, 2, 4)]
@@ -19,37 +18,40 @@ def hsv_to_hex(h, s, v):
 def rgb_to_hex(r, g, b):
     return f"#{int(r):02x}{int(g):02x}{int(b):02x}".upper()
 
-# --- Pillow 내장 고속 색상 추출 (라이브러리 충돌 방지) ---
+# --- 어떤 환경에서도 에러 없는 순수 파이썬 색상 분석 ---
 def analyze_clothing_colors(image, k=3):
     img = image.convert('RGB')
-    img = img.resize((100, 100))
-    pixels = list(img.getdata())
+    img = img.resize((60, 60))
+    raw_pixels = list(img.getdata())
 
-    # 흰색 배경(240 초과) 필터링
-    valid_pixels = [p for p in pixels if not (p[0] > 240 and p[1] > 240 and p[2] > 240)]
-    if not valid_pixels:
-        valid_pixels = pixels
+    # 흰색 배경(240 초과) 제외
+    valid = [p for p in raw_pixels if not (p[0] > 240 and p[1] > 240 and p[2] > 240)]
+    if not valid:
+        valid = raw_pixels
 
     # 1. 전체 평균색 계산
-    avg_r = int(sum(p[0] for p in valid_pixels) / len(valid_pixels))
-    avg_g = int(sum(p[1] for p in valid_pixels) / len(valid_pixels))
-    avg_b = int(sum(p[2] for p in valid_pixels) / len(valid_pixels))
+    total = len(valid)
+    avg_r = sum(p[0] for p in valid) // total
+    avg_g = sum(p[1] for p in valid) // total
+    avg_b = sum(p[2] for p in valid) // total
     avg_hex = rgb_to_hex(avg_r, avg_g, avg_b)
 
-    # 2. 대표 색상 추출 (Pillow Adaptive Palette 활용)
-    filtered_img = Image.new('RGB', (len(valid_pixels), 1))
-    filtered_img.putdata(valid_pixels)
-    quantized = filtered_img.quantize(colors=k, method=Image.Quantize.MEDIANCUT)
-    palette = quantized.getpalette()[:k*3]
-    
-    dominant_hexes = [
-        rgb_to_hex(palette[i], palette[i+1], palette[i+2])
-        for i in range(0, len(palette), 3)
-    ]
+    # 2. 색상 단순화(양자화) 후 가장 빈도 높은 색상 K개 추출
+    color_counts = {}
+    for r, g, b in valid:
+        # 32단위로 묶어 대표 톤 그룹핑
+        qr, qg, qb = (r // 32) * 32, (g // 32) * 32, (b // 32) * 32
+        color_counts[(qr, qg, qb)] = color_counts.get((qr, qg, qb), 0) + 1
+
+    sorted_colors = sorted(color_counts.items(), key=lambda x: x[1], reverse=True)
+    dominant_hexes = [rgb_to_hex(c[0][0], c[0][1], c[0][2]) for c in sorted_colors[:k]]
+
+    # 만약 색상이 K개 미만인 경우 보충
+    while len(dominant_hexes) < k:
+        dominant_hexes.append(avg_hex)
 
     return avg_hex, dominant_hexes
 
-# --- 바지 색상 기준 신발 & 양말 추천 엔진 ---
 def get_footwear_and_socks(bottom_hex):
     h, s, v = hex_to_hsv(bottom_hex)
     if v < 40:
@@ -77,7 +79,6 @@ def get_footwear_and_socks(bottom_hex):
             "guide": "중간 톤 팬츠에는 뉴트럴한 밝은 양말을 완충재로 두고 클래식 가죽화나 캔버스로 마무리합니다."
         }
 
-# --- 2피스 추천 로직 ---
 def get_2piece_recommendations(top_hex):
     h, s, v = hex_to_hsv(top_hex)
     raw_data = {
@@ -109,7 +110,6 @@ def get_2piece_recommendations(top_hex):
             item.update(get_footwear_and_socks(item["bottom"]))
     return raw_data
 
-# --- 3피스 추천 로직 ---
 def get_3piece_recommendations(outer_hex):
     h, s, v = hex_to_hsv(outer_hex)
     raw_data = {
@@ -181,7 +181,6 @@ def get_3piece_recommendations(outer_hex):
             item.update(get_footwear_and_socks(item["bottom"]))
     return raw_data
 
-# --- 일러스트 렌더링 함수 ---
 def render_full_outfit_card(top_color, bottom_color, socks_color, shoes_color, inner_color=None, label="", shoes_desc="", socks_desc="", guide=""):
     if inner_color:
         top_svg = (
@@ -245,7 +244,6 @@ def render_color_box(hex_color, label=""):
         f'</div>'
     )
 
-# --- 메인 레이아웃 ---
 st.set_page_config(page_title="의상 & 슈즈/삭스 풀코디 스타일러", layout="wide")
 
 st.title("👔 풀셋(상의·하의·신발·양말) 컬러 매치 스타일러")
