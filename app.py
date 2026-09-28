@@ -320,7 +320,7 @@ st.set_page_config(page_title="CCC - 의상 코디네이션 스타일러", page_
 main_tab1, main_tab2 = st.tabs(["🎨 의류 컬러 매치 스타일러", "📸 전신 착장 핏·컬러 AI 진단"])
 
 # ------------------------------------------
-# TAB 1: 기존 개별 의류 컬러 매칭 (촬영 기능 추가)
+# TAB 1: 기존 개별 의류 컬러 매칭 (사진 업로드 / 팔레트 선택)
 # ------------------------------------------
 with main_tab1:
     st.title("👔 풀셋(상의·하의·신발·양말) 컬러 매치 스타일러")
@@ -341,22 +341,17 @@ with main_tab1:
 
     with col1:
         st.subheader(f"1. 기준 {item_title} 색상")
-        input_tab1, input_tab2, input_tab3 = st.tabs(["📁 파일 업로드", "📷 직접 촬영", "🎨 팔레트 선택"])
+        input_tab1, input_tab2 = st.tabs(["📸 옷 사진 선택", "🎨 팔레트 직접 선택"])
         
         target_img = None
 
         with input_tab1:
-            uploaded_file = st.file_uploader(f"{item_title} 사진 업로드", type=["jpg", "jpeg", "png"], key="single_upload")
+            uploaded_file = st.file_uploader(f"{item_title} 사진을 올려주세요 (촬영 또는 앨범)", type=["jpg", "jpeg", "png"], key="single_upload")
             if uploaded_file is not None:
                 target_img = Image.open(uploaded_file)
 
-        with input_tab2:
-            camera_file = st.camera_input(f"{item_title} 직접 촬영", key="single_camera")
-            if camera_file is not None:
-                target_img = Image.open(camera_file)
-
         if target_img is not None:
-            st.image(target_img, caption=f"분석 대상 {item_title}", use_container_width=True)
+            st.image(target_img, caption=f"업로드한 {item_title}", use_container_width=True)
             avg_color, dominant_colors = analyze_clothing_colors(target_img, k=3)
             
             st.markdown("**🏁 패턴/혼방 전체 평균톤:**")
@@ -372,7 +367,7 @@ with main_tab1:
                     if st.button(f"색상 {idx+1}", key=f"img_col_{idx}", use_container_width=True):
                         st.session_state.base_color = c_hex
 
-        with input_tab3:
+        with input_tab2:
             picked = st.color_picker("색상환에서 직접 선택", st.session_state.base_color)
             if picked != st.session_state.base_color:
                 st.session_state.base_color = picked
@@ -435,29 +430,20 @@ with main_tab1:
                             )
 
 # ------------------------------------------
-# TAB 2: 신규 전신 착장 평가 및 분석
+# TAB 2: 전신 착장 평가 및 분석 (단일 업로더)
 # ------------------------------------------
 with main_tab2:
     st.title("📸 전신 착장(OOTD) 핏 & 컬러 종합 진단")
-    st.markdown("정면 전신 거울 샷 또는 서 있는 사진을 올려주시면, 상·하의 조화와 실루엣 밸런스를 진단해 드립니다.")
+    st.markdown("정면 전신 거울 샷 또는 착장 사진을 올려주시면 상·하의 조화와 실루엣 밸런스를 진단해 드립니다.")
 
     b_col1, b_col2 = st.columns([1, 1.2])
 
     fullbody_img = None
     with b_col1:
         st.subheader("사진 등록")
-        b_input_mode = st.radio("입력 방식 선택", ["📷 카메라로 즉시 촬영", "📁 앨범에서 사진 선택"], horizontal=True)
-
-        if b_input_mode == "📷 카메라로 즉시 촬영":
-            cam_data = st.camera_input("전신이 다 보이도록 서서 촬영해주세요", key="fullbody_cam")
-            if cam_data:
-                fullbody_img = Image.open(cam_data)
-        else:
-            file_data = st.file_uploader("전신 착장 사진 업로드", type=["jpg", "jpeg", "png"], key="fullbody_file")
-            if file_data:
-                fullbody_img = Image.open(file_data)
-
-        if fullbody_img:
+        file_data = st.file_uploader("전신 착장 사진 선택 (촬영 또는 앨범)", type=["jpg", "jpeg", "png"], key="fullbody_file")
+        if file_data:
+            fullbody_img = Image.open(file_data)
             st.image(fullbody_img, caption="분석 대상 착장 사진", use_container_width=True)
 
     with b_col2:
@@ -495,4 +481,4 @@ with main_tab2:
             st.markdown(f"**{report['mood']}**")
             st.caption(f"💡 보완 팁: {report['mood_tip']}")
         else:
-            st.info("👈 왼쪽에서 카메라로 촬영하거나 전신 사진을 올려주시면 분석 리포트가 표시됩니다.")
+            st.info("👈 왼쪽에서 전신 사진을 등록(촬영 또는 앨범 선택)하시면 분석 리포트가 표시됩니다.")
