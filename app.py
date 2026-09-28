@@ -1,6 +1,16 @@
 import colorsys
-from PIL import Image
+from PIL import Image, ImageOps
 import streamlit as st
+
+# ==========================================
+# 0. 스마트폰 EXIF 회전 보정 유틸리티
+# ==========================================
+def fix_orientation(image):
+    """스마트폰 카메라가 남긴 EXIF 회전 메타데이터를 감지해 원래 세로 방향으로 바르게 정렬"""
+    try:
+        return ImageOps.exif_transpose(image)
+    except Exception:
+        return image
 
 # ==========================================
 # 1. 색상 변환 및 유틸리티 함수
@@ -21,32 +31,25 @@ def hsv_to_hex(h, s, v):
 def rgb_to_hex(r, g, b):
     return f"#{int(r):02x}{int(g):02x}{int(b):02x}".upper()
 
-# --- 피부톤 및 무의미한 배경 픽셀 판정 ---
+# --- 피부톤 및 극단 배경 픽셀 배제 ---
 def is_skin_or_extreme(r, g, b):
-    # 너무 밝은 반사광 또는 완전 암전/그림자 배제
     if (r > 245 and g > 245 and b > 245) or (r < 15 and g < 15 and b < 15):
         return True
-    
-    # 전형적인 동양인/일반 피부톤(Skin tone) 범위 배제
-    # R > G > B 형태이면서 특정 임계치 충족 시 피부/손/목 등으로 간주
     if r > 95 and g > 40 and b > 20:
         if (max(r, g, b) - min(r, g, b) > 15) and abs(r - g) > 15 and r > g and r > b:
-            # 밝은 살구색~황토색 계열 피부
             if 0.6 < (r / (g + 0.1)) < 1.6 and b < g:
                 return True
     return False
 
-# --- 의류 중심부의 순수 원단 색상(최빈도 대표색) 추출 ---
+# --- 의류 중심부 대표색 추출 ---
 def extract_pure_cloth_color(crop_img):
     crop = crop_img.resize((50, 50))
     raw_pixels = list(crop.getdata())
     
-    # 1. 극단값 및 피부톤 픽셀 필터링
     filtered = [p for p in raw_pixels if not is_skin_or_extreme(p[0], p[1], p[2])]
     if not filtered or len(filtered) < 30:
         filtered = raw_pixels
 
-    # 2. 색상 양자화(Grouping)하여 배경 노이즈를 뚫고 가장 넓게 분포한 의류 메인 톤 산출
     buckets = {}
     for r, g, b in filtered:
         qr = (r // 24) * 24
@@ -57,7 +60,6 @@ def extract_pure_cloth_color(crop_img):
     sorted_buckets = sorted(buckets.items(), key=lambda x: x[1], reverse=True)
     top_group = sorted_buckets[0][0]
 
-    # 해당 대표 버킷에 속한 원본 픽셀들의 정밀 평균 계산
     members = [p for p in filtered if (p[0]//24)*24 == top_group[0] and (p[1]//24)*24 == top_group[1] and (p[2]//24)*24 == top_group[2]]
     if members:
         avg_r = sum(p[0] for p in members) // len(members)
@@ -68,7 +70,6 @@ def extract_pure_cloth_color(crop_img):
 
     return rgb_to_hex(avg_r, avg_g, avg_b)
 
-# --- 1번 탭용 단일 의류 색상 분석 ---
 def analyze_clothing_colors(image, k=3):
     img = image.convert('RGB')
     img = img.resize((60, 60))
@@ -97,23 +98,20 @@ def analyze_clothing_colors(image, k=3):
 
     return avg_hex, dominant_hexes
 
-# --- 2번 탭: 배경 배제 및 인체 인체 비례 기반 전신 착장 분석 ---
+# --- 전신 사진 상/하의 영역 샘플링 ---
 def analyze_fullbody_outfit(image):
     img = image.convert('RGB')
     w, h = img.size
 
-    # 인체 중앙 코어 영역 타겟팅 (배경, 벽지, 주변 가구 제외를 위해 좌우 30%~70% 구역 지정)
-    # 상의: 목 아래 가슴~명치 구역 (인체 23% ~ 46%)
+    # 세로 이미지 기준 황금 분할
     top_box = (int(w * 0.30), int(h * 0.23), int(w * 0.70), int(h * 0.46))
     top_crop = img.crop(top_box)
     top_hex = extract_pure_cloth_color(top_crop)
 
-    # 하의: 골반 아래 허벅지~무릎 구역 (인체 53% ~ 78%)
     bot_box = (int(w * 0.32), int(h * 0.53), int(w * 0.68), int(h * 0.78))
     bot_crop = img.crop(bot_box)
     bottom_hex = extract_pure_cloth_color(bot_crop)
 
-    # 색상 수치 해석
     top_h, top_s, top_v = hex_to_hsv(top_hex)
     bot_h, bot_s, bot_v = hex_to_hsv(bottom_hex)
     v_diff = abs(top_v - bot_v)
@@ -121,7 +119,6 @@ def analyze_fullbody_outfit(image):
     if h_diff > 180:
         h_diff = 360 - h_diff
 
-    # 1. 색상 조화도 판정
     if v_diff < 22 and (h_diff < 35 or top_s < 20 or bot_s < 20):
         color_eval = "🌟 톤온톤 (Tone-on-Tone) 조화"
         color_desc = "상·하의 톤이 자연스럽게 이어져 시선이 끊기지 않고 전체적인 신장이 커 보이는 안정적이고 단정한 조합입니다."
@@ -132,7 +129,6 @@ def analyze_fullbody_outfit(image):
         color_eval = "🌿 밸런스드 내추럴 믹스"
         color_desc = "색조와 밝기가 부드럽게 어우러져 일상 데일리 룩이나 미팅에 적합한 편안한 인상을 줍니다."
 
-    # 2. 핏 & 비율 피드백
     if top_v > bot_v and v_diff >= 30:
         fit_tip = "상의가 하의보다 밝아 **시선이 상체로 집중**되므로 키가 커 보이고 비율이 좋아 보이는 황금 배색입니다. 바지 허리선이 살짝 드러나도록 턱인(넣입)하면 다리가 더욱 길어 보입니다."
     elif top_v < bot_v and v_diff >= 30:
@@ -140,7 +136,6 @@ def analyze_fullbody_outfit(image):
     else:
         fit_tip = "상·하의 무게감이 균일합니다. 벨트나 슈즈(신발), 가방 등의 악세서리로 허리선이나 발끝에 포인트 컬러를 두면 단조로움을 없앨 수 있습니다."
 
-    # 3. 전체 분위기(Mood) 판정
     avg_v = (top_v + bot_v) / 2
     if avg_v < 35:
         mood = "🖤 모던 미니멀 / 시크 포멀"
@@ -165,7 +160,7 @@ def analyze_fullbody_outfit(image):
     }
 
 # ==========================================
-# 2. 풀코디 추천 알고리즘 및 렌더링
+# 2. 추천 템플릿 및 렌더링
 # ==========================================
 def get_footwear_and_socks(bottom_hex):
     h, s, v = hex_to_hsv(bottom_hex)
@@ -266,7 +261,8 @@ def get_3piece_recommendations(outer_hex):
             {
                 "name": "소프트 보색 팬츠",
                 "inner": "#F8F9FA",
-                "bottom": hsv_to_hex(h + 180, max(20, s * 0.5), min(85, v + 10))
+                "bottom": hsv_to_hex(h + 180, max(20, s * 0.5), min(85, v + 10)),
+                "bg": hsv_to_hex(h + 180, max(20, s * 0.5), min(85, v + 10))
             }
         ],
         "트라이어드": [
@@ -359,7 +355,7 @@ def render_color_box(hex_color, label=""):
     )
 
 # ==========================================
-# 3. 메인 앱 레이아웃
+# 3. 메인 앱 화면 구성
 # ==========================================
 st.set_page_config(page_title="CCC - 의상 코디네이션 스타일러", page_icon="👔", layout="wide")
 
@@ -394,7 +390,8 @@ with main_tab1:
         with input_tab1:
             uploaded_file = st.file_uploader(f"{item_title} 사진을 올려주세요", type=["jpg", "jpeg", "png"], key="single_upload")
             if uploaded_file is not None:
-                target_img = Image.open(uploaded_file)
+                # EXIF 회전 자동 보정 적용
+                target_img = fix_orientation(Image.open(uploaded_file))
 
         if target_img is not None:
             st.image(target_img, caption=f"업로드한 {item_title}", use_container_width=True)
@@ -476,11 +473,14 @@ with main_tab1:
                             )
 
 # ------------------------------------------
-# TAB 2: 전신 착장 정밀 분석 (배경/노이즈 제거)
+# TAB 2: 전신 착장 정밀 분석 (세로 방향 자동 고정 및 회전 지원)
 # ------------------------------------------
 with main_tab2:
     st.title("📸 전신 착장(OOTD) 핏 & 컬러 종합 진단")
     st.markdown("정면 전신 거울 샷 또는 착장 사진을 올려주시면, 배경 사물을 배제하고 상·하의 조화와 실루엣을 정밀 분석합니다.")
+
+    if "body_rotation" not in st.session_state:
+        st.session_state.body_rotation = 0
 
     b_col1, b_col2 = st.columns([1, 1.2])
 
@@ -489,8 +489,25 @@ with main_tab2:
         st.subheader("사진 등록")
         file_data = st.file_uploader("전신 착장 사진 선택 (촬영 또는 앨범)", type=["jpg", "jpeg", "png"], key="fullbody_file")
         if file_data:
-            fullbody_img = Image.open(file_data)
-            st.image(fullbody_img, caption="업로드된 원본 착장 사진", use_container_width=True)
+            # 1. EXIF 메타데이터 기반 세로 방향 자동 회전 보정
+            raw_img = Image.open(file_data)
+            oriented_img = fix_orientation(raw_img)
+
+            # 2. 추가 수동 90도 회전 지원
+            rot_col1, rot_col2 = st.columns(2)
+            with rot_col1:
+                if st.button("🔄 시계방향 90° 회전", use_container_width=True):
+                    st.session_state.body_rotation = (st.session_state.body_rotation - 90) % 360
+            with rot_col2:
+                if st.button("↺ 회전 초기화", use_container_width=True):
+                    st.session_state.body_rotation = 0
+
+            if st.session_state.body_rotation != 0:
+                fullbody_img = oriented_img.rotate(st.session_state.body_rotation, expand=True)
+            else:
+                fullbody_img = oriented_img
+
+            st.image(fullbody_img, caption="분석 대상 착장 사진 (세로 정렬)", use_container_width=True)
 
     with b_col2:
         st.subheader("진단 리포트")
@@ -500,7 +517,7 @@ with main_tab2:
 
             st.success("✅ 인체 착장 영역 분석 완료!")
 
-            # 감지 영역 미리보기
+            # 상/하의 감지 썸네일 미리보기
             st.markdown("##### 🔍 AI가 인식한 실제 착장 원단 영역")
             preview_col1, preview_col2 = st.columns(2)
             with preview_col1:
