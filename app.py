@@ -21,13 +21,59 @@ def hsv_to_hex(h, s, v):
 def rgb_to_hex(r, g, b):
     return f"#{int(r):02x}{int(g):02x}{int(b):02x}".upper()
 
-# --- 순수 파이썬 의류 색상 분석 ---
+# --- 피부톤 및 무의미한 배경 픽셀 판정 ---
+def is_skin_or_extreme(r, g, b):
+    # 너무 밝은 반사광 또는 완전 암전/그림자 배제
+    if (r > 245 and g > 245 and b > 245) or (r < 15 and g < 15 and b < 15):
+        return True
+    
+    # 전형적인 동양인/일반 피부톤(Skin tone) 범위 배제
+    # R > G > B 형태이면서 특정 임계치 충족 시 피부/손/목 등으로 간주
+    if r > 95 and g > 40 and b > 20:
+        if (max(r, g, b) - min(r, g, b) > 15) and abs(r - g) > 15 and r > g and r > b:
+            # 밝은 살구색~황토색 계열 피부
+            if 0.6 < (r / (g + 0.1)) < 1.6 and b < g:
+                return True
+    return False
+
+# --- 의류 중심부의 순수 원단 색상(최빈도 대표색) 추출 ---
+def extract_pure_cloth_color(crop_img):
+    crop = crop_img.resize((50, 50))
+    raw_pixels = list(crop.getdata())
+    
+    # 1. 극단값 및 피부톤 픽셀 필터링
+    filtered = [p for p in raw_pixels if not is_skin_or_extreme(p[0], p[1], p[2])]
+    if not filtered or len(filtered) < 30:
+        filtered = raw_pixels
+
+    # 2. 색상 양자화(Grouping)하여 배경 노이즈를 뚫고 가장 넓게 분포한 의류 메인 톤 산출
+    buckets = {}
+    for r, g, b in filtered:
+        qr = (r // 24) * 24
+        qg = (g // 24) * 24
+        qb = (b // 24) * 24
+        buckets[(qr, qg, qb)] = buckets.get((qr, qg, qb), 0) + 1
+
+    sorted_buckets = sorted(buckets.items(), key=lambda x: x[1], reverse=True)
+    top_group = sorted_buckets[0][0]
+
+    # 해당 대표 버킷에 속한 원본 픽셀들의 정밀 평균 계산
+    members = [p for p in filtered if (p[0]//24)*24 == top_group[0] and (p[1]//24)*24 == top_group[1] and (p[2]//24)*24 == top_group[2]]
+    if members:
+        avg_r = sum(p[0] for p in members) // len(members)
+        avg_g = sum(p[1] for p in members) // len(members)
+        avg_b = sum(p[2] for p in members) // len(members)
+    else:
+        avg_r, avg_g, avg_b = top_group
+
+    return rgb_to_hex(avg_r, avg_g, avg_b)
+
+# --- 1번 탭용 단일 의류 색상 분석 ---
 def analyze_clothing_colors(image, k=3):
     img = image.convert('RGB')
     img = img.resize((60, 60))
     raw_pixels = list(img.getdata())
 
-    # 흰색 배경(240 초과) 제외
     valid = [p for p in raw_pixels if not (p[0] > 240 and p[1] > 240 and p[2] > 240)]
     if not valid:
         valid = raw_pixels
@@ -38,7 +84,6 @@ def analyze_clothing_colors(image, k=3):
     avg_b = sum(p[2] for p in valid) // total
     avg_hex = rgb_to_hex(avg_r, avg_g, avg_b)
 
-    # 32단위 양자화
     color_counts = {}
     for r, g, b in valid:
         qr, qg, qb = (r // 32) * 32, (g // 32) * 32, (b // 32) * 32
@@ -52,32 +97,23 @@ def analyze_clothing_colors(image, k=3):
 
     return avg_hex, dominant_hexes
 
-# --- 전신 사진 상/하의 영역 샘플링 분석 함수 ---
+# --- 2번 탭: 배경 배제 및 인체 인체 비례 기반 전신 착장 분석 ---
 def analyze_fullbody_outfit(image):
     img = image.convert('RGB')
     w, h = img.size
 
-    # 1. 상의 추정 영역 (상위 20%~48%, 좌우 중앙 50%)
-    top_box = (int(w * 0.25), int(h * 0.20), int(w * 0.75), int(h * 0.48))
-    top_crop = img.crop(top_box).resize((40, 40))
-    top_pixels = list(top_crop.getdata())
-    top_valid = [p for p in top_pixels if not (p[0] > 240 and p[1] > 240 and p[2] > 240)] or top_pixels
-    top_r = sum(p[0] for p in top_valid) // len(top_valid)
-    top_g = sum(p[1] for p in top_valid) // len(top_valid)
-    top_b = sum(p[2] for p in top_valid) // len(top_valid)
-    top_hex = rgb_to_hex(top_r, top_g, top_b)
+    # 인체 중앙 코어 영역 타겟팅 (배경, 벽지, 주변 가구 제외를 위해 좌우 30%~70% 구역 지정)
+    # 상의: 목 아래 가슴~명치 구역 (인체 23% ~ 46%)
+    top_box = (int(w * 0.30), int(h * 0.23), int(w * 0.70), int(h * 0.46))
+    top_crop = img.crop(top_box)
+    top_hex = extract_pure_cloth_color(top_crop)
 
-    # 2. 하의 추정 영역 (상위 52%~82%, 좌우 중앙 50%)
-    bottom_box = (int(w * 0.25), int(h * 0.52), int(w * 0.75), int(h * 0.82))
-    bottom_crop = img.crop(bottom_box).resize((40, 40))
-    bottom_pixels = list(bottom_crop.getdata())
-    bottom_valid = [p for p in bottom_pixels if not (p[0] > 240 and p[1] > 240 and p[2] > 240)] or bottom_pixels
-    bot_r = sum(p[0] for p in bottom_valid) // len(bottom_valid)
-    bot_g = sum(p[1] for p in bottom_valid) // len(bottom_valid)
-    bot_b = sum(p[2] for p in bottom_valid) // len(bottom_valid)
-    bottom_hex = rgb_to_hex(bot_r, bot_g, bot_b)
+    # 하의: 골반 아래 허벅지~무릎 구역 (인체 53% ~ 78%)
+    bot_box = (int(w * 0.32), int(h * 0.53), int(w * 0.68), int(h * 0.78))
+    bot_crop = img.crop(bot_box)
+    bottom_hex = extract_pure_cloth_color(bot_crop)
 
-    # 3. 색상 조화 및 명도 계산
+    # 색상 수치 해석
     top_h, top_s, top_v = hex_to_hsv(top_hex)
     bot_h, bot_s, bot_v = hex_to_hsv(bottom_hex)
     v_diff = abs(top_v - bot_v)
@@ -85,36 +121,47 @@ def analyze_fullbody_outfit(image):
     if h_diff > 180:
         h_diff = 360 - h_diff
 
-    # 컬러 조화 진단
-    if v_diff < 25 and (h_diff < 35 or top_s < 20 or bot_s < 20):
+    # 1. 색상 조화도 판정
+    if v_diff < 22 and (h_diff < 35 or top_s < 20 or bot_s < 20):
         color_eval = "🌟 톤온톤 (Tone-on-Tone) 조화"
-        color_desc = "상·하의 톤이 자연스럽게 이어져 시선이 분절되지 않고 키가 커 보이는 차분한 효과를 줍니다."
-    elif v_diff >= 45:
-        color_eval = "⚡ 명확한 콘트라스트 (명도 대비)"
-        color_desc = "상·하의 경계가 뚜렷해 단정하고 시원하며, 바디 프로포션을 경쾌하게 잡아줍니다."
+        color_desc = "상·하의 톤이 자연스럽게 이어져 시선이 끊기지 않고 전체적인 신장이 커 보이는 안정적이고 단정한 조합입니다."
+    elif v_diff >= 40:
+        color_eval = "⚡ 선명한 명도 대비 (Contrast Fit)"
+        color_desc = "상·하의 경계선이 명확하여 다리 시작점이 돋보이며, 상체와 하체의 실루엣을 명확하게 분리해 주는 세련된 배색입니다."
     else:
-        color_eval = "🌿 밸런스드 내추럴 매치"
-        color_desc = "과하지 않은 적당한 톤 차이로 부담 없는 데일리 룩 실루엣을 완성합니다."
+        color_eval = "🌿 밸런스드 내추럴 믹스"
+        color_desc = "색조와 밝기가 부드럽게 어우러져 일상 데일리 룩이나 미팅에 적합한 편안한 인상을 줍니다."
 
-    # 분위기(Mood) 판정
+    # 2. 핏 & 비율 피드백
+    if top_v > bot_v and v_diff >= 30:
+        fit_tip = "상의가 하의보다 밝아 **시선이 상체로 집중**되므로 키가 커 보이고 비율이 좋아 보이는 황금 배색입니다. 바지 허리선이 살짝 드러나도록 턱인(넣입)하면 다리가 더욱 길어 보입니다."
+    elif top_v < bot_v and v_diff >= 30:
+        fit_tip = "하의가 상의보다 밝은 형태입니다. 하의 통이 지나치게 넓으면 하체가 팽창되어 보일 수 있으니, 스트레이트 핏 바지를 입거나 아우터로 무게감을 잡아주는 것을 추천합니다."
+    else:
+        fit_tip = "상·하의 무게감이 균일합니다. 벨트나 슈즈(신발), 가방 등의 악세서리로 허리선이나 발끝에 포인트 컬러를 두면 단조로움을 없앨 수 있습니다."
+
+    # 3. 전체 분위기(Mood) 판정
     avg_v = (top_v + bot_v) / 2
-    if avg_v < 38:
-        mood = "🖤 모던 시크 / 미니멀 다크"
-        mood_tip = "밝은 컬러의 스니커즈나 목걸이, 은은한 소재 차이로 답답함을 덜어내면 더욱 세련됩니다."
+    if avg_v < 35:
+        mood = "🖤 모던 미니멀 / 시크 포멀"
+        mood_guide = "세련되고 신뢰감을 주는 룩입니다. 흰색 스니커즈나 실버 톤 악세서리로 작은 포인트를 더해주면 무거워 보이지 않습니다."
     elif avg_v > 75:
         mood = "☀️ 브라이트 캐주얼 / 클린 내추럴"
-        mood_tip = "전체적으로 화사하며 깨끗한 인상을 줍니다. 가죽 악세서리나 시계로 중심을 눌러주면 균형이 좋습니다."
+        mood_guide = "화사하고 친근한 인상을 줍니다. 가죽 신발, 벨트 또는 다크 톤 시계로 전체 중심을 살짝 눌러주면 완성도가 훨씬 올라갑니다."
     else:
         mood = "☕ 클래식 댄디 / 어반 데일리"
-        mood_tip = "어느 상황에나 두루 잘 어울리는 안정적인 출근·데이트 무드입니다."
+        mood_guide = "누구에게나 호감을 주는 최적의 밸런스 룩입니다. 단정하고 깔끔한 실루엣을 유지하기 좋습니다."
 
     return {
+        "top_crop": top_crop,
+        "bot_crop": bot_crop,
         "top_hex": top_hex,
         "bottom_hex": bottom_hex,
         "color_eval": color_eval,
         "color_desc": color_desc,
+        "fit_tip": fit_tip,
         "mood": mood,
-        "mood_tip": mood_tip
+        "mood_guide": mood_guide
     }
 
 # ==========================================
@@ -219,8 +266,7 @@ def get_3piece_recommendations(outer_hex):
             {
                 "name": "소프트 보색 팬츠",
                 "inner": "#F8F9FA",
-                "bottom": hsv_to_hex(h + 180, max(20, s * 0.5), min(85, v + 10)),
-                "bg": hsv_to_hex(h + 180, max(20, s * 0.5), min(85, v + 10))
+                "bottom": hsv_to_hex(h + 180, max(20, s * 0.5), min(85, v + 10))
             }
         ],
         "트라이어드": [
@@ -313,14 +359,14 @@ def render_color_box(hex_color, label=""):
     )
 
 # ==========================================
-# 3. Streamlit 메인 앱 화면 구성
+# 3. 메인 앱 레이아웃
 # ==========================================
 st.set_page_config(page_title="CCC - 의상 코디네이션 스타일러", page_icon="👔", layout="wide")
 
 main_tab1, main_tab2 = st.tabs(["🎨 의류 컬러 매치 스타일러", "📸 전신 착장 핏·컬러 AI 진단"])
 
 # ------------------------------------------
-# TAB 1: 기존 개별 의류 컬러 매칭 (사진 업로드 / 팔레트 선택)
+# TAB 1: 개별 의류 컬러 매칭
 # ------------------------------------------
 with main_tab1:
     st.title("👔 풀셋(상의·하의·신발·양말) 컬러 매치 스타일러")
@@ -346,7 +392,7 @@ with main_tab1:
         target_img = None
 
         with input_tab1:
-            uploaded_file = st.file_uploader(f"{item_title} 사진을 올려주세요 (촬영 또는 앨범)", type=["jpg", "jpeg", "png"], key="single_upload")
+            uploaded_file = st.file_uploader(f"{item_title} 사진을 올려주세요", type=["jpg", "jpeg", "png"], key="single_upload")
             if uploaded_file is not None:
                 target_img = Image.open(uploaded_file)
 
@@ -430,11 +476,11 @@ with main_tab1:
                             )
 
 # ------------------------------------------
-# TAB 2: 전신 착장 평가 및 분석 (단일 업로더)
+# TAB 2: 전신 착장 정밀 분석 (배경/노이즈 제거)
 # ------------------------------------------
 with main_tab2:
     st.title("📸 전신 착장(OOTD) 핏 & 컬러 종합 진단")
-    st.markdown("정면 전신 거울 샷 또는 착장 사진을 올려주시면 상·하의 조화와 실루엣 밸런스를 진단해 드립니다.")
+    st.markdown("정면 전신 거울 샷 또는 착장 사진을 올려주시면, 배경 사물을 배제하고 상·하의 조화와 실루엣을 정밀 분석합니다.")
 
     b_col1, b_col2 = st.columns([1, 1.2])
 
@@ -444,24 +490,34 @@ with main_tab2:
         file_data = st.file_uploader("전신 착장 사진 선택 (촬영 또는 앨범)", type=["jpg", "jpeg", "png"], key="fullbody_file")
         if file_data:
             fullbody_img = Image.open(file_data)
-            st.image(fullbody_img, caption="분석 대상 착장 사진", use_container_width=True)
+            st.image(fullbody_img, caption="업로드된 원본 착장 사진", use_container_width=True)
 
     with b_col2:
         st.subheader("진단 리포트")
         if fullbody_img:
-            with st.spinner("착장의 명도 대비, 조화도, 실루엣을 분석 중입니다..."):
+            with st.spinner("배경 및 피부 노이즈를 분리하고 사람의 상/하의 원단을 집중 분석 중입니다..."):
                 report = analyze_fullbody_outfit(fullbody_img)
 
-            st.success("✅ 착장 분석이 완료되었습니다!")
+            st.success("✅ 인체 착장 영역 분석 완료!")
+
+            # 감지 영역 미리보기
+            st.markdown("##### 🔍 AI가 인식한 실제 착장 원단 영역")
+            preview_col1, preview_col2 = st.columns(2)
+            with preview_col1:
+                st.image(report["top_crop"], caption="인식된 상의 코어 영역", use_container_width=True)
+            with preview_col2:
+                st.image(report["bot_crop"], caption="인식된 하의 코어 영역", use_container_width=True)
+
+            st.markdown("---")
 
             # 1. 색상 매치 분석
             st.markdown("#### 1. 상·하의 컬러 조화")
             c_col1, c_col2 = st.columns(2)
             with c_col1:
-                st.markdown(f"**감지된 상의 톤 ({report['top_hex']})**")
+                st.markdown(f"**상의 대표색 ({report['top_hex']})**")
                 st.markdown(f'<div style="background:{report["top_hex"]}; height:35px; border-radius:6px; border:1px solid #ddd;"></div>', unsafe_allow_html=True)
             with c_col2:
-                st.markdown(f"**감지된 하의 톤 ({report['bottom_hex']})**")
+                st.markdown(f"**하의 대표색 ({report['bottom_hex']})**")
                 st.markdown(f'<div style="background:{report["bottom_hex"]}; height:35px; border-radius:6px; border:1px solid #ddd;"></div>', unsafe_allow_html=True)
 
             st.write("")
@@ -469,16 +525,15 @@ with main_tab2:
 
             # 2. 실루엣 및 핏 피드백
             st.markdown("#### 2. 실루엣 & 핏(Fit) 가이드")
+            st.markdown(f"💡 {report['fit_tip']}")
             st.markdown("""
-            * **상·하체 시각 비율:** 상의를 바지 안에 깔끔하게 넣입(Tuck-in)하거나 기장이 골반선에 위치할 때 다리가 가장 길어 보입니다.
-            * **실루엣 강약 조절:** 
-                * 상의가 오버핏이라면 하의를 테이퍼드나 슬림 스트레이트로 잡아주는 것이 안정적입니다.
-                * 하의가 와이드 팬츠라면 상의는 어깨선에 맞추거나 크롭 기장을 선택해 시선 중심을 위로 올려주세요.
+            * **기장감 점검:** 상의 밑단이 바지 지퍼의 절반 정도를 덮거나 벨트선에 위치할 때 다리가 가장 길어 보이는 최적의 비례를 만듭니다.
+            * **실루엣 대비:** 상의가 박시하거나 루즈핏이라면 팬츠는 일자(스트레이트)나 슬림핏으로 정리하는 것이 안정적인 역삼각형 실루엣을 완성합니다.
             """)
 
             # 3. 분위기 및 스타일링 제안
             st.markdown("#### 3. 착장 무드 & 스타일링 팁")
             st.markdown(f"**{report['mood']}**")
-            st.caption(f"💡 보완 팁: {report['mood_tip']}")
+            st.caption(f"✨ 추천 디테일: {report['mood_guide']}")
         else:
-            st.info("👈 왼쪽에서 전신 사진을 등록(촬영 또는 앨범 선택)하시면 분석 리포트가 표시됩니다.")
+            st.info("👈 왼쪽에서 전신이 잘 보이는 사진을 올려주시면 분석 리포트가 표시됩니다.\n\n*(정면에서 서서 찍은 사진일수록 정확도가 가장 높습니다.)*")
